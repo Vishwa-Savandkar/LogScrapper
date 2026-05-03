@@ -156,6 +156,48 @@ def test_datadog_api_uses_prompt_style_primary_fallback_and_expanded_window():
     assert client.requests[0]["json"]["page"]["limit"] == 2
 
 
+def test_datadog_api_merges_queries_before_taking_latest_logs():
+    settings = AppSettings(
+        datadog_api_key="api-key",
+        datadog_app_key="app-key",
+        datadog_fetch_mode="api",
+        datadog_site="datadoghq.eu",
+        datadog_primary_query="service:worker error",
+        datadog_fallback_query='service:worker ("[ERR]" OR exception OR failed)',
+        datadog_initial_lookback_days=1,
+        datadog_expanded_lookback_days=0,
+        max_logs_per_run=2,
+    )
+    connector = DatadogConnector(settings)
+    older_primary = {
+        "id": "older-primary",
+        "type": "log",
+        "attributes": {"timestamp": "2026-05-02T09:00:00Z", "message": "older primary"},
+    }
+    newer_primary = {
+        "id": "newer-primary",
+        "type": "log",
+        "attributes": {"timestamp": "2026-05-02T10:00:00Z", "message": "newer primary"},
+    }
+    newest_fallback = {
+        "id": "newest-fallback",
+        "type": "log",
+        "attributes": {"timestamp": "2026-05-03T10:00:00Z", "message": "[ERR] newest fallback"},
+    }
+    client = FakeMCPClient(
+        [
+            FakeResponse({"data": [older_primary, newer_primary], "meta": {"page": {}}}),
+            FakeResponse({"data": [newest_fallback], "meta": {"page": {}}}),
+        ]
+    )
+
+    logs = connector._fetch_logs_with_api_client(client)
+
+    assert [log["id"] for log in logs] == ["newest-fallback", "newer-primary"]
+    assert client.requests[0]["json"]["filter"]["query"] == "service:worker error"
+    assert client.requests[1]["json"]["filter"]["query"] == 'service:worker ("[ERR]" OR exception OR failed)'
+
+
 def test_datadog_logs_api_does_not_retry_bad_query_response():
     response = FakeResponse({"errors": ["invalid query"]}, status_code=400)
     response.text = '{"errors":["invalid query"]}'

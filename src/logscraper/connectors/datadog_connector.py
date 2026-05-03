@@ -69,18 +69,7 @@ class DatadogConnector:
         return payload
 
     def build_search_plan(self) -> list[tuple[str, int]]:
-        primary_query = self.build_query()
-        fallback_query = self.settings.datadog_fallback_query.strip()
-        queries = [primary_query]
-        if fallback_query and fallback_query != primary_query:
-            queries.append(fallback_query)
-
-        windows = [self._initial_lookback_minutes()]
-        expanded_minutes = self.settings.datadog_expanded_lookback_days * 24 * 60
-        if expanded_minutes > windows[0]:
-            windows.append(expanded_minutes)
-
-        return [(query, window) for window in windows for query in queries]
+        return [(query, window) for window in self._search_windows() for query in self._search_queries()]
 
     def build_log_search_arguments(
         self,
@@ -166,15 +155,20 @@ class DatadogConnector:
     def _fetch_logs_with_api_client(self, client: Any) -> list[dict[str, Any]]:
         logs: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
-        for query, lookback_minutes in self.build_search_plan():
-            for payload in self._fetch_logs_for_query(client, query, lookback_minutes):
-                event_id = str(payload.get("id") or json.dumps(payload, sort_keys=True, default=str))
-                if event_id in seen_ids:
-                    continue
-                seen_ids.add(event_id)
-                logs.append(payload)
-                if len(logs) >= self.settings.max_logs_per_run:
-                    break
+        for lookback_minutes in self._search_windows():
+            for query in self._search_queries():
+                for payload in self._fetch_logs_for_query(client, query, lookback_minutes):
+                    event_id = str(payload.get("id") or json.dumps(payload, sort_keys=True, default=str))
+                    if event_id in seen_ids:
+                        continue
+                    seen_ids.add(event_id)
+                    logs.append(payload)
+
+            logs = self._sort_logs_newest_first(logs)
+            print(
+                "[datadog] logs_api_window completed; "
+                f"lookback_minutes={lookback_minutes} collected={len(logs)}"
+            )
             if len(logs) >= self.settings.max_logs_per_run:
                 break
         return logs[: self.settings.max_logs_per_run]
@@ -191,6 +185,14 @@ class DatadogConnector:
 
         while len(logs) < self.settings.max_logs_per_run:
             payload = self.build_search_payload(cursor=cursor, query=query, lookback_minutes=lookback_minutes)
+            print(
+                "[datadog] logs_api_search started; "
+                f"query={payload['filter']['query']} "
+                f"from={payload['filter']['from']} "
+                f"to={payload['filter']['to']} "
+                f"sort={payload['sort']} "
+                f"limit={payload['page']['limit']}"
+            )
             response = self._post_with_retries(
                 client,
                 url,
@@ -199,11 +201,50 @@ class DatadogConnector:
                 request_name="Datadog Logs API request",
             )
             body = response.json()
-            logs.extend(body.get("data", []))
+            page_logs = body.get("data", [])
+            logs.extend(page_logs)
             cursor = body.get("meta", {}).get("page", {}).get("after")
+            print(
+                "[datadog] logs_api_search completed; "
+                f"returned={len(page_logs)} total_for_query={len(logs)} has_next={bool(cursor)}"
+            )
             if not cursor:
                 break
         return logs[: self.settings.max_logs_per_run]
+
+    def _search_queries(self) -> list[str]:
+        primary_query = self.build_query()
+        fallback_query = self.settings.datadog_fallback_query.strip()
+        queries = [primary_query]
+        if fallback_query and fallback_query != primary_query:
+            queries.append(fallback_query)
+        return queries
+
+    def _search_windows(self) -> list[int]:
+        windows = [self._initial_lookback_minutes()]
+        expanded_minutes = self.settings.datadog_expanded_lookback_days * 24 * 60
+        if expanded_minutes > windows[0]:
+            windows.append(expanded_minutes)
+        return windows
+
+    def _sort_logs_newest_first(self, logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(logs, key=self._log_timestamp, reverse=True)
+
+    def _log_timestamp(self, payload: dict[str, Any]) -> datetime:
+        attributes = payload.get("attributes", {}) if isinstance(payload, dict) else {}
+        value = attributes.get("timestamp") if isinstance(attributes, dict) else None
+        if value is None:
+            value = payload.get("timestamp") if isinstance(payload, dict) else None
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else datetime.min
+            except ValueError:
+                parsed = datetime.min
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def _fetch_logs_with_mcp_client(self, client: Any) -> list[dict[str, Any]]:
         self._initialize_mcp_session(client)
