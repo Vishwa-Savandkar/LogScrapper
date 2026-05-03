@@ -22,7 +22,37 @@ Copy-Item .env.example .env
 
 Fill in Datadog credentials and service settings in `.env`. Keep `DRY_RUN=true` until you intentionally want live GitHub writes.
 
-The app currently uses Datadog's Logs REST API directly. It accepts either `DATADOG_API_KEY` / `DATADOG_APP_KEY` or the MCP-style aliases `DD_API_KEY` / `DD_APP_KEY`.
+The app accepts either `DATADOG_API_KEY` / `DATADOG_APP_KEY` or the MCP-style aliases `DD_API_KEY` plus `DD_APP_KEY` or `DD_APPLICATION_KEY`.
+
+Set `DATADOG_FETCH_MODE` to choose how logs are fetched:
+
+```powershell
+DATADOG_FETCH_MODE=api   # Datadog Logs Search API; default
+DATADOG_FETCH_MODE=mcp   # Datadog remote MCP server
+DATADOG_FETCH_MODE=auto  # Try MCP, then fall back to API for MCP permission/setup errors
+```
+
+The API mode requires `Logs Read Data` and `Logs Read Index Data` on the application key owner. The MCP mode fetches logs through Datadog's remote MCP server using the `search_datadog_logs` tool. Set `DATADOG_MCP_URL` for your Datadog site, for example:
+
+```powershell
+DATADOG_MCP_URL=https://mcp.datadoghq.eu/api/unstable/mcp-server/mcp
+```
+
+To fetch logs that Datadog marks as `info` but whose message looks like an error, configure query fallbacks and inferred error matching:
+
+```powershell
+DATADOG_PRIMARY_QUERY=service:basecone.test17.matching.processor.worker error
+DATADOG_FALLBACK_QUERY=service:basecone.test17.matching.processor.worker ("[ERR]" OR error OR exception OR failed OR fatal OR (*stack* AND *trace*))
+DATADOG_INITIAL_LOOKBACK_DAYS=7
+DATADOG_EXPANDED_LOOKBACK_DAYS=30
+DATADOG_INCLUDE_INFERRED_ERRORS=true
+DATADOG_ERROR_KEYWORDS=[ERR],error,exception,failed,fatal,stack trace
+MAX_LOGS_PER_RUN=10
+```
+
+The Datadog application key must have MCP access plus the log-read permissions needed by `search_datadog_logs`. On Windows, the app also loads certificates from the Windows trusted certificate store for corporate TLS proxies. If your company uses a separate PEM bundle, set `DATADOG_MCP_CA_BUNDLE` to that file. `DATADOG_MCP_VERIFY_SSL=false` is available for a temporary local connectivity check, but should not be used as the normal configuration.
+
+The Datadog VS Code extension may work through its signed-in/OAuth session even when API/app-key header authentication does not. LogScraper runs as a standalone Python app, so the owner of the app key used by `DD_APP_KEY`, `DD_APPLICATION_KEY`, or `DATADOG_APP_KEY` must have Datadog MCP permissions.
 
 ## Run
 

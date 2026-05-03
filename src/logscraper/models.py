@@ -44,6 +44,8 @@ class LogEvent(BaseModel):
     fingerprint: str = ""
     trace_id: str | None = None
     span_id: str | None = None
+    inferred_severity: str | None = None
+    document_id: str | None = None
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     frames: list[StackFrame] = Field(default_factory=list)
 

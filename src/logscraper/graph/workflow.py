@@ -154,11 +154,17 @@ class LogScraperWorkflow:
         return path
 
     def _fetch_node(self, state: AgentState) -> AgentState:
+        print("[workflow] fetch_datadog_logs started")
         if state.get("log_events"):
+            print(f"[workflow] fetch_datadog_logs skipped; existing_events={len(state['log_events'])}")
             return state
-        return {**state, "log_events": self.fetch_datadog_logs()}
+        log_events = self.fetch_datadog_logs()
+        print(f"[workflow] fetch_datadog_logs completed; events={len(log_events)}")
+        self._print_fetched_events(log_events)
+        return {**state, "log_events": log_events}
 
     def _deduplicate_node(self, state: AgentState) -> AgentState:
+        print(f"[workflow] deduplicate_errors started; events={len(state.get('log_events', []))}")
         seen: set[str] = set()
         unique: list[LogEvent] = []
         for event in state.get("log_events", []):
@@ -166,6 +172,7 @@ class LogScraperWorkflow:
                 continue
             seen.add(event.fingerprint)
             unique.append(event)
+        print(f"[workflow] deduplicate_errors completed; unique_events={len(unique)}")
         return {**state, "log_events": unique}
 
     def _route_after_routing(self, state: AgentState) -> str:
@@ -174,55 +181,96 @@ class LogScraperWorkflow:
     def fetch_datadog_logs(self) -> list[LogEvent]:
         return self.log_scraper.fetch_events()
 
+    def _print_fetched_events(self, events: list[LogEvent]) -> None:
+        for index, event in enumerate(events, start=1):
+            print(
+                "[workflow] fetched_event "
+                f"#{index} timestamp={event.timestamp.isoformat()} "
+                f"status={event.log_level} inferred={event.inferred_severity} "
+                f"service={event.service} document_id={event.document_id} "
+                f"fingerprint={event.fingerprint} "
+                f"message={self._truncate(event.error_message, limit=300)}"
+            )
+
+    def _truncate(self, value: str, *, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        return f"{value[: limit - 3]}..."
+
     def route_error(self, state: AgentState) -> AgentState:
+        print(f"[workflow] route_error started; events={len(state.get('log_events', []))}")
         for event in state.get("log_events", []):
             route, task = self.master.route_event(event)
             state["route"] = route
+            print(f"[workflow] route_error checked; route={route} fingerprint={event.fingerprint}")
             if task:
                 state["current_event"] = event
                 state["resolution_task"] = task
                 self.history.update_status(task.fingerprint, ErrorStatus.IN_ANALYSIS)
+                print(f"[workflow] route_error completed; selected_fingerprint={task.fingerprint}")
                 return state
+        print("[workflow] route_error completed; no actionable task")
         return state
 
     def analyze_dotnet_code(self, state: AgentState) -> AgentState:
+        print("[workflow] analyze_dotnet_code started")
         task = state.get("resolution_task")
         if task is None:
+            print("[workflow] analyze_dotnet_code skipped; no resolution task")
             return state
         state["code_fix_plan"] = self.analyzer.analyze(task)
+        print(f"[workflow] analyze_dotnet_code completed; fingerprint={task.fingerprint}")
         return state
 
     def plan_fix(self, state: AgentState) -> AgentState:
+        print("[workflow] plan_fix started")
         task = state.get("resolution_task")
         if task is not None:
             self.history.update_status(task.fingerprint, ErrorStatus.FIX_PLANNED)
+            print(f"[workflow] plan_fix completed; fingerprint={task.fingerprint}")
+        else:
+            print("[workflow] plan_fix skipped; no resolution task")
         return state
 
     def apply_or_dry_run_fix(self, state: AgentState) -> AgentState:
+        print("[workflow] apply_or_dry_run_fix started")
         task = state.get("resolution_task")
         plan = state.get("code_fix_plan")
         if task is None or plan is None:
+            print("[workflow] apply_or_dry_run_fix skipped; missing task or plan")
             return state
         state["pull_request_result"] = self.resolver.prepare_pull_request(task, plan)
+        result = state["pull_request_result"]
+        print(
+            "[workflow] apply_or_dry_run_fix completed; "
+            f"dry_run={result.dry_run} branch={result.branch_name} pr_url={result.pr_url}"
+        )
         return state
 
     def review_fix(self, state: AgentState) -> AgentState:
+        print("[workflow] review_fix started")
         plan = state.get("code_fix_plan")
         result = state.get("pull_request_result")
         if plan is None or result is None:
+            print("[workflow] review_fix skipped; missing plan or pull request result")
             return state
         state["review_result"] = self.reviewer.review(plan, result)
+        print("[workflow] review_fix completed")
         return state
 
     def update_history(self, state: AgentState) -> AgentState:
+        print("[workflow] update_history started")
         task = state.get("resolution_task")
         result = state.get("pull_request_result")
         if task is None or result is None:
+            print("[workflow] update_history skipped; missing task or pull request result")
             return state
         if result.pr_url:
             self.history.attach_pr(task.fingerprint, result.pr_url, status=ErrorStatus.IN_REVIEW)
+            print(f"[workflow] update_history completed; pr_url={result.pr_url}")
         else:
             self.history.update_status(task.fingerprint, ErrorStatus.FIX_PLANNED)
+            print(f"[workflow] update_history completed; status={ErrorStatus.FIX_PLANNED.value}")
         return state
 
 

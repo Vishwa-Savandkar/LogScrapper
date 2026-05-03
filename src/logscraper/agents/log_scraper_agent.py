@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,6 +9,11 @@ from logscraper.connectors.datadog_connector import DatadogConnector
 from logscraper.dotnet.stacktrace_parser import DotNetStackTraceParser
 from logscraper.fingerprint import fingerprint_error
 from logscraper.models import LogEvent
+
+
+_DOCUMENT_ID_RE = re.compile(
+    r"\bdocument:\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
 
 
 class LogScraperAgent:
@@ -27,7 +33,12 @@ class LogScraperAgent:
     def events_from_payloads(self, payloads: list[dict[str, Any]]) -> list[LogEvent]:
         events = [self.event_from_payload(payload) for payload in payloads]
         allowed_levels = {level.upper() for level in self.settings.datadog_log_levels}
-        return [event for event in events if event.log_level.upper() in allowed_levels]
+        return [
+            event
+            for event in events
+            if event.log_level.upper() in allowed_levels
+            or (self.settings.datadog_include_inferred_errors and event.inferred_severity == "ERROR")
+        ]
 
     def event_from_payload(self, payload: dict[str, Any]) -> LogEvent:
         attributes = payload.get("attributes", {}) if isinstance(payload, dict) else {}
@@ -63,6 +74,7 @@ class LogScraperAgent:
         message = message or parsed.message
         stack_trace = stack_trace or parsed.stack_trace
         frames = parsed.frames if parsed.frames else self.parser.parse_stack_trace(stack_trace)
+        inferred_severity = self._infer_severity(message, stack_trace)
 
         fingerprint = fingerprint_error(
             exception_type=exception_type,
@@ -82,6 +94,8 @@ class LogScraperAgent:
             fingerprint=fingerprint,
             trace_id=self._first_present(merged, "dd.trace_id", "trace_id", "TraceId"),
             span_id=self._first_present(merged, "dd.span_id", "span_id", "SpanId"),
+            inferred_severity=inferred_severity,
+            document_id=self._extract_document_id(message, stack_trace),
             raw_payload=payload,
             frames=frames,
         )
@@ -92,6 +106,18 @@ class LogScraperAgent:
             if value is not None and str(value).strip():
                 return str(value)
         return None
+
+    def _infer_severity(self, *parts: str) -> str | None:
+        text = "\n".join(part for part in parts if part).lower()
+        for keyword in self.settings.datadog_error_keywords:
+            if keyword.lower() in text:
+                return "ERROR"
+        return None
+
+    def _extract_document_id(self, *parts: str) -> str | None:
+        text = "\n".join(part for part in parts if part)
+        match = _DOCUMENT_ID_RE.search(text)
+        return match.group(1) if match else None
 
     def _parse_timestamp(self, value: Any) -> datetime:
         if isinstance(value, datetime):

@@ -50,6 +50,34 @@ def test_workflow_routes_new_error_to_dry_run_pr(tmp_path: Path):
     assert duplicate_state["resolution_task"] is None
 
 
+def test_workflow_prints_nodes_and_fetched_events(tmp_path: Path, capsys):
+    settings = AppSettings(db_path=str(tmp_path / "history.db"), dry_run=True)
+    raw = {
+        "attributes": {
+            "timestamp": "2026-05-03T02:30:00Z",
+            "service": "checkout-api",
+            "status": "info",
+            "message": "[ERR] Error matching customer on address for document: 6e68ef12-0244-423e-9141-c0d8a8352726",
+        }
+    }
+    event = LogScraperAgent(settings).event_from_payload(raw)
+    workflow = build_workflow(
+        settings=settings,
+        log_scraper=FakeLogScraper([event]),
+        history=HistoryDB(tmp_path / "history.db"),
+    )
+
+    workflow.run()
+
+    output = capsys.readouterr().out
+    assert "[workflow] fetch_datadog_logs started" in output
+    assert "[workflow] fetched_event #1" in output
+    assert "status=INFO" in output
+    assert "inferred=ERROR" in output
+    assert "document_id=6e68ef12-0244-423e-9141-c0d8a8352726" in output
+    assert "[workflow] route_error started" in output
+
+
 def test_workflow_draws_mermaid_graph(tmp_path: Path):
     settings = AppSettings(db_path=str(tmp_path / "history.db"), dry_run=True)
     workflow = build_workflow(
