@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": "abc-123",
+      "type": "log",
+      "attributes": {
+        "timestamp": "2026-05-03T02:30:00Z",
+        "service": "checkout-api",
+        "status": "error",
+        "attributes": {
+          "env": "prod",
+          "exception.type": "System.NullReferenceException",
+          "exception.message": "Object reference not set to an instance of an object. requestId=9b4f7ce4-9b8a-4e4c-a2e5-a7c8aa14d997",
+          "exception.stacktrace": "   at Checkout.Api.Controllers.OrderController.Get(Int32 id) in C:\\src\\Checkout.Api\\Controllers\\OrderController.cs:line 42\n   at Microsoft.AspNetCore.Mvc.Infrastructure.ActionMethodExecutor.Execute(ActionContext actionContext)"
+        }
+      }
+    }
+  ]
+}

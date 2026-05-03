@@ -1,0 +1,47 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "LogScraper: Run application",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "justMyCode": true
+    },
+    {
+      "name": "LogScraper: Run application + render graph",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "WORKFLOW_GRAPH_PATH": "${workspaceFolder}/data/workflow-graph.mmd"
+      },
+      "justMyCode": true
+    },
+    {
+      "name": "LogScraper: Render graph only",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src",
+        "WORKFLOW_GRAPH_PATH": "${workspaceFolder}/data/workflow-graph.mmd",
+        "WORKFLOW_GRAPH_ONLY": "true"
+      },
+      "justMyCode": true
+    }
+  ]
+}
