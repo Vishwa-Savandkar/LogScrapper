@@ -66,7 +66,7 @@ class HistoryDB:
                 (
                     event.fingerprint,
                     event.exception_type,
-                    event.error_message,
+                    event.exception_message or event.error_message,
                     event.service,
                     event.environment,
                     event.timestamp.isoformat(),

@@ -40,12 +40,16 @@ class LogEvent(BaseModel):
     log_level: str = "ERROR"
     exception_type: str | None = None
     error_message: str = ""
+    exception_message: str = ""
+    detailed_exception: str = ""
     stack_trace: str = ""
     fingerprint: str = ""
     trace_id: str | None = None
     span_id: str | None = None
     inferred_severity: str | None = None
     document_id: str | None = None
+    log_attributes: dict[str, Any] = Field(default_factory=dict)
+    log_fields: dict[str, Any] = Field(default_factory=dict)
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     frames: list[StackFrame] = Field(default_factory=list)
 

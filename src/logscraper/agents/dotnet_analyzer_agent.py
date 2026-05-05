@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from logscraper.config import AppSettings
@@ -25,7 +26,8 @@ class DotNetAnalyzerAgent:
             )
             root_hint = f"The top .NET stack frame points at {member or first_frame.raw}."
 
-        root_cause_summary = f"{event.exception_type or 'Unknown exception'}: {event.error_message}. {root_hint}"
+        primary_message = event.exception_message or event.error_message
+        root_cause_summary = f"{event.exception_type or 'Unknown exception'}: {primary_message}. {root_hint}"
         error_context = self._error_context(task, root_hint)
         repo = self._repo_path(repo_path)
         if not repo:
@@ -85,7 +87,17 @@ class DotNetAnalyzerAgent:
             f"Service: {event.service or 'unknown'}",
             f"Environment: {event.environment or 'unknown'}",
             f"Exception: {event.exception_type or 'unknown'}",
-            f"Message: {event.error_message or 'n/a'}",
+            f"Log message: {event.error_message or 'n/a'}",
+            f"Exception message: {event.exception_message or 'n/a'}",
+            "Detailed exception:",
+            self._limit_text(event.detailed_exception or "n/a", limit=6000),
+            "Parsed stack frames:",
+            self._stack_frame_text(event.frames),
+            "Structured log fields:",
+            self._limit_text(
+                self._json_text(event.log_fields or event.log_attributes or event.raw_payload),
+                limit=6000,
+            ),
             root_hint,
             "Stack trace:",
             self._limit_text(event.stack_trace or "n/a", limit=6000),
@@ -107,6 +119,13 @@ class DotNetAnalyzerAgent:
         if len(value) <= limit:
             return value
         return f"{value[: limit - 3]}..."
+
+    def _json_text(self, value: object) -> str:
+        return json.dumps(value, default=str, sort_keys=True) if value else "{}"
+
+    def _stack_frame_text(self, frames: object) -> str:
+        frame_lines = [getattr(frame, "raw", "") for frame in frames or []]
+        return "\n".join(line for line in frame_lines if line) or "n/a"
 
     def _relative(self, root: Path, path: Path) -> str:
         try:

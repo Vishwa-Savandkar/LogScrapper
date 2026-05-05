@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -197,13 +198,18 @@ class LogScraperWorkflow:
                 f"status={event.log_level} inferred={event.inferred_severity} "
                 f"service={event.service} document_id={event.document_id} "
                 f"fingerprint={event.fingerprint} "
-                f"message={self._truncate(event.error_message, limit=300)}"
+                f"message={self._truncate(event.exception_message or event.error_message, limit=300)} "
+                f"frames={len(event.frames)}"
             )
+            print(f"[workflow] fetched_event_full #{index} {self._json_text(event.raw_payload)}")
 
     def _truncate(self, value: str, *, limit: int) -> str:
         if len(value) <= limit:
             return value
         return f"{value[: limit - 3]}..."
+
+    def _json_text(self, value: Any) -> str:
+        return json.dumps(value, default=str, sort_keys=True)
 
     def route_error(self, state: AgentState) -> AgentState:
         print(f"[workflow] route_error started; events={len(state.get('log_events', []))}")
@@ -269,7 +275,11 @@ class LogScraperWorkflow:
         if task is None or plan is None:
             print("[workflow] apply_or_dry_run_fix skipped; missing task or plan")
             return state
-        state["pull_request_result"] = self.resolver.prepare_pull_request(task, plan)
+        state["pull_request_result"] = self.resolver.apply_or_dry_run_fix(
+            task,
+            plan,
+            repo_path=state.get("repo_path"),
+        )
         result = state["pull_request_result"]
         print(
             "[workflow] apply_or_dry_run_fix completed; "
