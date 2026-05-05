@@ -3,6 +3,7 @@ from pathlib import Path
 from logscraper.agents.log_scraper_agent import LogScraperAgent
 from logscraper.config import AppSettings
 from logscraper.graph.workflow import build_workflow
+from logscraper.models import CodeFixPlan
 from logscraper.store.history_db import HistoryDB
 
 
@@ -14,8 +15,47 @@ class FakeLogScraper:
         return self.events
 
 
+class FakeRepoWorkspace:
+    def __init__(self, path: Path):
+        self.path = path
+        self.fingerprint = None
+
+    def prepare(self, fingerprint: str):
+        self.fingerprint = fingerprint
+        return self.path
+
+
+class FakeAnalyzer:
+    def __init__(self):
+        self.repo_path = None
+
+    def analyze(self, task, repo_path=None):
+        self.repo_path = repo_path
+        return CodeFixPlan(
+            fingerprint=task.fingerprint,
+            root_cause_summary="Fake root cause",
+            suggested_fix="Fake suggested fix",
+            confidence=0.75,
+        )
+
+
+def make_settings(tmp_path: Path, **overrides):
+    values = {
+        "_env_file": str(tmp_path / "missing.env"),
+        "db_path": str(tmp_path / "history.db"),
+        "dry_run": True,
+        "github_token": "",
+        "github_repo_owner": "",
+        "github_repo_name": "",
+        "openai_api_key": "",
+        "dotnet_repo_path": "",
+    }
+    values.update(overrides)
+    return AppSettings(**values)
+
+
 def test_workflow_routes_new_error_to_dry_run_pr(tmp_path: Path):
-    settings = AppSettings(db_path=str(tmp_path / "history.db"), dry_run=True)
+    settings = make_settings(tmp_path)
     raw = {
         "attributes": {
             "timestamp": "2026-05-03T02:30:00Z",
@@ -50,8 +90,47 @@ def test_workflow_routes_new_error_to_dry_run_pr(tmp_path: Path):
     assert duplicate_state["resolution_task"] is None
 
 
+def test_workflow_prepares_github_repo_before_analysis(tmp_path: Path):
+    settings = make_settings(
+        tmp_path,
+        github_token="fake-token",
+        github_repo_owner="example",
+        github_repo_name="checkout-api",
+    )
+    raw = {
+        "attributes": {
+            "timestamp": "2026-05-03T02:30:00Z",
+            "service": "checkout-api",
+            "status": "error",
+            "attributes": {
+                "env": "prod",
+                "exception.type": "System.InvalidOperationException",
+                "exception.message": "Example failure.",
+            },
+        }
+    }
+    event = LogScraperAgent(settings).event_from_payload(raw)
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    repo_workspace = FakeRepoWorkspace(repo_path)
+    analyzer = FakeAnalyzer()
+    workflow = build_workflow(
+        settings=settings,
+        log_scraper=FakeLogScraper([event]),
+        history=HistoryDB(tmp_path / "history.db"),
+        analyzer=analyzer,
+        repo_workspace=repo_workspace,
+    )
+
+    state = workflow.run()
+
+    assert state["repo_path"] == str(repo_path)
+    assert repo_workspace.fingerprint == event.fingerprint
+    assert analyzer.repo_path == str(repo_path)
+
+
 def test_workflow_prints_nodes_and_fetched_events(tmp_path: Path, capsys):
-    settings = AppSettings(db_path=str(tmp_path / "history.db"), dry_run=True)
+    settings = make_settings(tmp_path)
     raw = {
         "attributes": {
             "timestamp": "2026-05-03T02:30:00Z",
@@ -79,7 +158,7 @@ def test_workflow_prints_nodes_and_fetched_events(tmp_path: Path, capsys):
 
 
 def test_workflow_draws_mermaid_graph(tmp_path: Path):
-    settings = AppSettings(db_path=str(tmp_path / "history.db"), dry_run=True)
+    settings = make_settings(tmp_path)
     workflow = build_workflow(
         settings=settings,
         log_scraper=FakeLogScraper([]),

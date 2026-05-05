@@ -9,6 +9,7 @@ from logscraper.agents.master_agent import MasterAgent
 from logscraper.agents.pr_reviewer_agent import PRReviewerAgent
 from logscraper.agents.resolver_agent import ResolverAgent
 from logscraper.config import AppSettings
+from logscraper.connectors.github_workspace import GitHubRepoWorkspace
 from logscraper.models import (
     CodeFixPlan,
     ErrorStatus,
@@ -27,6 +28,7 @@ class AgentState(TypedDict, total=False):
     code_fix_plan: CodeFixPlan | None
     pull_request_result: PullRequestResult | None
     review_result: ReviewResult | None
+    repo_path: str | None
     errors: list[str]
     route: str | None
 
@@ -41,6 +43,7 @@ class LogScraperWorkflow:
         analyzer: DotNetAnalyzerAgent,
         resolver: ResolverAgent,
         reviewer: PRReviewerAgent,
+        repo_workspace: GitHubRepoWorkspace,
         history: HistoryDB,
     ) -> None:
         self.settings = settings
@@ -49,6 +52,7 @@ class LogScraperWorkflow:
         self.analyzer = analyzer
         self.resolver = resolver
         self.reviewer = reviewer
+        self.repo_workspace = repo_workspace
         self.history = history
 
     def run(self, initial_state: AgentState | None = None) -> AgentState:
@@ -59,6 +63,7 @@ class LogScraperWorkflow:
             "code_fix_plan": None,
             "pull_request_result": None,
             "review_result": None,
+            "repo_path": None,
             "errors": [],
             "route": None,
         }
@@ -79,6 +84,7 @@ class LogScraperWorkflow:
             state = self.route_error(state)
             if not state.get("resolution_task"):
                 return state
+            state = self.prepare_repo_workspace(state)
             state = self.analyze_dotnet_code(state)
             state = self.plan_fix(state)
             state = self.apply_or_dry_run_fix(state)
@@ -100,6 +106,7 @@ class LogScraperWorkflow:
         graph.add_node("fetch_datadog_logs", self._fetch_node)
         graph.add_node("deduplicate_errors", self._deduplicate_node)
         graph.add_node("route_error", self.route_error)
+        graph.add_node("prepare_repo_workspace", self.prepare_repo_workspace)
         graph.add_node("analyze_dotnet_code", self.analyze_dotnet_code)
         graph.add_node("plan_fix", self.plan_fix)
         graph.add_node("apply_or_dry_run_fix", self.apply_or_dry_run_fix)
@@ -113,10 +120,11 @@ class LogScraperWorkflow:
             "route_error",
             self._route_after_routing,
             {
-                "actionable": "analyze_dotnet_code",
+                "actionable": "prepare_repo_workspace",
                 "done": END,
             },
         )
+        graph.add_edge("prepare_repo_workspace", "analyze_dotnet_code")
         graph.add_edge("analyze_dotnet_code", "plan_fix")
         graph.add_edge("plan_fix", "apply_or_dry_run_fix")
         graph.add_edge("apply_or_dry_run_fix", "review_fix")
@@ -212,13 +220,35 @@ class LogScraperWorkflow:
         print("[workflow] route_error completed; no actionable task")
         return state
 
+    def prepare_repo_workspace(self, state: AgentState) -> AgentState:
+        print("[workflow] prepare_repo_workspace started")
+        task = state.get("resolution_task")
+        if task is None:
+            print("[workflow] prepare_repo_workspace skipped; no resolution task")
+            return state
+
+        if self.settings.github_token and self.settings.github_repository:
+            repo_path = self.repo_workspace.prepare(task.fingerprint)
+            state["repo_path"] = str(repo_path)
+            print(f"[workflow] prepare_repo_workspace completed; repo_path={repo_path}")
+            return state
+
+        local_repo = self.settings.dotnet_repo
+        if local_repo:
+            state["repo_path"] = str(local_repo)
+            print(f"[workflow] prepare_repo_workspace completed; local_repo_path={local_repo}")
+            return state
+
+        print("[workflow] prepare_repo_workspace completed; no GitHub or local repo configured")
+        return state
+
     def analyze_dotnet_code(self, state: AgentState) -> AgentState:
         print("[workflow] analyze_dotnet_code started")
         task = state.get("resolution_task")
         if task is None:
             print("[workflow] analyze_dotnet_code skipped; no resolution task")
             return state
-        state["code_fix_plan"] = self.analyzer.analyze(task)
+        state["code_fix_plan"] = self.analyzer.analyze(task, repo_path=state.get("repo_path"))
         print(f"[workflow] analyze_dotnet_code completed; fingerprint={task.fingerprint}")
         return state
 
@@ -282,6 +312,7 @@ def build_workflow(
     analyzer: DotNetAnalyzerAgent | None = None,
     resolver: ResolverAgent | None = None,
     reviewer: PRReviewerAgent | None = None,
+    repo_workspace: GitHubRepoWorkspace | None = None,
 ) -> LogScraperWorkflow:
     resolved_settings = settings or AppSettings()
     resolved_history = history or HistoryDB(resolved_settings.db_path)
@@ -292,5 +323,6 @@ def build_workflow(
         analyzer=analyzer or DotNetAnalyzerAgent(resolved_settings),
         resolver=resolver or ResolverAgent(resolved_settings),
         reviewer=reviewer or PRReviewerAgent(),
+        repo_workspace=repo_workspace or GitHubRepoWorkspace(resolved_settings),
         history=resolved_history,
     )

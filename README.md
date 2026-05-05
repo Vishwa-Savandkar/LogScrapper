@@ -1,7 +1,7 @@
 LogScraper
 ==========
 
-LogScraper is a Python agent foundation for turning Datadog .NET error logs into a safe, reviewable resolution workflow. V1 is dry-run-first: it fetches and parses Datadog logs, fingerprints duplicate .NET exceptions, stores history in SQLite, maps stack frames to a local C# repository when configured, and prepares PR metadata for human review.
+LogScraper is a Python agent foundation for turning Datadog .NET error logs into a safe, reviewable resolution workflow. It fetches and parses Datadog logs, fingerprints duplicate .NET exceptions, stores history in SQLite, prepares a GitHub-backed repo workspace, maps stack frames to C# files, asks OpenAI for fix guidance when configured, and prepares PR metadata for human review.
 
 ## Current V1 Capabilities
 
@@ -10,7 +10,8 @@ LogScraper is a Python agent foundation for turning Datadog .NET error logs into
 - Stable fingerprinting that strips volatile IDs, timestamps, paths, and line numbers.
 - SQLite history for first seen, last seen, occurrence count, status, and PR URL.
 - Explicit workflow state for ingestion, routing, analysis, PR preparation, review, and history updates.
-- Local .NET repository analysis through `DOTNET_REPO_PATH`.
+- GitHub repository checkout for .NET analysis, with `DOTNET_REPO_PATH` as a local fallback.
+- OpenAI-assisted fix guidance using mapped stack frames and compact source snippets.
 - Dry-run PR branch, commit message, title, and body generation.
 
 ## Setup
@@ -20,7 +21,7 @@ uv sync --extra dev
 Copy-Item .env.example .env
 ```
 
-Fill in Datadog credentials and service settings in `.env`. Keep `DRY_RUN=true` until you intentionally want live GitHub writes.
+Fill in Datadog credentials, GitHub repository settings, and OpenAI settings in `.env`. Keep `DRY_RUN=true` until you intentionally want live GitHub writes.
 
 The app accepts either `DATADOG_API_KEY` / `DATADOG_APP_KEY` or the MCP-style aliases `DD_API_KEY` plus `DD_APP_KEY` or `DD_APPLICATION_KEY`.
 
@@ -53,6 +54,35 @@ MAX_LOGS_PER_RUN=10
 The Datadog application key must have MCP access plus the log-read permissions needed by `search_datadog_logs`. On Windows, the app also loads certificates from the Windows trusted certificate store for corporate TLS proxies. If your company uses a separate PEM bundle, set `DATADOG_MCP_CA_BUNDLE` to that file. `DATADOG_MCP_VERIFY_SSL=false` is available for a temporary local connectivity check, but should not be used as the normal configuration.
 
 The Datadog VS Code extension may work through its signed-in/OAuth session even when API/app-key header authentication does not. LogScraper runs as a standalone Python app, so the owner of the app key used by `DD_APP_KEY`, `DD_APPLICATION_KEY`, or `DATADOG_APP_KEY` must have Datadog MCP permissions.
+
+## GitHub and OpenAI
+
+For cloud-style agent runs, configure the GitHub repository instead of relying on a local checkout:
+
+```powershell
+GITHUB_TOKEN=your-classic-or-fine-grained-token
+GITHUB_REPO_OWNER=your-org-or-user
+GITHUB_REPO_NAME=your-dotnet-repo
+GITHUB_BASE_BRANCH=main
+```
+
+When an actionable error is selected, the workflow clones the repo into:
+
+```text
+data/workspaces/{fingerprint}/repo
+```
+
+`DOTNET_REPO_PATH` is still supported as a local fallback when GitHub settings are not present.
+
+OpenAI analysis is enabled with:
+
+```powershell
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your-openai-key
+LLM_MODEL=gpt-4o-mini
+```
+
+If OpenAI is not configured or the request fails, the analyzer falls back to the existing stack-frame based fix plan.
 
 ## Run
 
@@ -93,4 +123,5 @@ uv run pytest
 - Dry-run mode is enabled by default.
 - The workflow never auto-merges.
 - Live GitHub PR creation requires `DRY_RUN=false`, `GITHUB_TOKEN`, `GITHUB_REPO_OWNER`, and `GITHUB_REPO_NAME`.
+- The GitHub token is used for cloning through a temporary askpass script and is not written into the repo URL.
 - Automated analysis only edits or proposes work around mapped stack-frame files; human review remains required.
