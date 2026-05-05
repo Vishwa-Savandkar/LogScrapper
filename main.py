@@ -1,6 +1,5 @@
-def main():
-    print("Hello from logscraper!")
+from logscraper.main import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

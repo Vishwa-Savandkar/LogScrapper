@@ -1,7 +1,33 @@
 [project]
 name = "logscraper"
 version = "0.1.0"
-description = "Add your description here"
+description = "Datadog-to-.NET auto-resolution agent with dry-run GitHub PR preparation."
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "langgraph>=0.2.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "pygithub>=2.3.0",
+    "tenacity>=8.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+]
+
+[project.scripts]
+logscraper = "logscraper.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/logscraper"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
