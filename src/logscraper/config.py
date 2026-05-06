@@ -181,6 +181,9 @@ class AppSettings:
         self.similarity_threshold = float(
             _get_setting(overrides, env, "similarity_threshold", "SIMILARITY_THRESHOLD", default=0.85)
         )
+        self.confidence_threshold = float(
+            _get_setting(overrides, env, "confidence_threshold", "CONFIDENCE_THRESHOLD", default=0.5)
+        )
 
     @property
     def datadog_base_url(self) -> str:

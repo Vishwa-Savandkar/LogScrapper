@@ -38,3 +38,33 @@ class GitHubConnector:
             response = client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             return str(response.json()["html_url"])
+
+    def get_pr_state(self, pr_url: str) -> str | None:
+        """Return PR state: 'open', 'closed', or 'merged'. None on failure."""
+        if not self.settings.github_token or not pr_url:
+            return None
+        try:
+            import httpx
+        except ImportError:
+            return None
+
+        # Convert html URL to API URL: github.com/owner/repo/pull/N -> api.github.com/repos/owner/repo/pulls/N
+        import re
+        match = re.search(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", pr_url)
+        if not match:
+            return None
+        api_url = f"https://api.github.com/repos/{match.group(1)}/pulls/{match.group(2)}"
+        headers = {
+            "Authorization": f"Bearer {self.settings.github_token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            with httpx.Client(timeout=self.timeout_seconds) as client:
+                resp = client.get(api_url, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("merged"):
+                    return "merged"
+                return str(data.get("state", "open"))
+        except Exception:
+            return None

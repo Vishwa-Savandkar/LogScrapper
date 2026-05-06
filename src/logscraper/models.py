@@ -110,3 +110,19 @@ class ReviewResult(BaseModel):
     approved: bool = False
     findings: list[str] = Field(default_factory=list)
     residual_risk: str = ""
+
+
+class ProcessedError(BaseModel):
+    """Summary of one error processed during a workflow run."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    fingerprint: str
+    exception_type: str | None = None
+    route: str = ""
+    confidence: float = 0.0
+    pr_url: str | None = None
+    review_approved: bool = False
+    review_findings: list[str] = Field(default_factory=list)
+    validation_passed: bool | None = None
+    outcome: str = ""
