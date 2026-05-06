@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import uuid
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -15,6 +17,7 @@ from logscraper.models import (
     CodeFixPlan,
     ErrorStatus,
     LogEvent,
+    ProcessedError,
     PullRequestResult,
     ResolutionTask,
     ReviewResult,
@@ -32,6 +35,8 @@ class AgentState(TypedDict, total=False):
     repo_path: str | None
     errors: list[str]
     route: str | None
+    processed_errors: list[ProcessedError]
+    validation_passed: bool | None
 
 
 class LogScraperWorkflow:
@@ -55,6 +60,8 @@ class LogScraperWorkflow:
         self.reviewer = reviewer
         self.repo_workspace = repo_workspace
         self.history = history
+        self._logger = logging.getLogger("logscraper.workflow")
+        self._run_id = uuid.uuid4().hex[:12]
 
     def run(self, initial_state: AgentState | None = None) -> AgentState:
         state: AgentState = {
@@ -67,33 +74,28 @@ class LogScraperWorkflow:
             "repo_path": None,
             "errors": [],
             "route": None,
+            "processed_errors": [],
+            "validation_passed": None,
         }
         if initial_state:
             state.update(initial_state)
 
         graph = self.to_langgraph()
         if graph is not None:
+            config = {"configurable": {"thread_id": f"logscraper-{self._run_id}"}}
             try:
-                return graph.invoke(state)
+                return graph.invoke(state, config=config)
             except Exception as exc:
                 state.setdefault("errors", []).append(str(exc))
-                return state
+                # Retry once from checkpoint
+                try:
+                    return graph.invoke(None, config=config)
+                except Exception:
+                    return state
 
-        try:
-            if not state["log_events"]:
-                state["log_events"] = self.fetch_datadog_logs()
-            state = self.route_error(state)
-            if not state.get("resolution_task"):
-                return state
-            state = self.prepare_repo_workspace(state)
-            state = self.analyze_dotnet_code(state)
-            state = self.plan_fix(state)
-            state = self.apply_or_dry_run_fix(state)
-            state = self.review_fix(state)
-            state = self.update_history(state)
-        except Exception as exc:
-            state.setdefault("errors", []).append(str(exc))
-        return state
+        raise RuntimeError(
+            "LangGraph is required but not installed. Install it with: pip install langgraph"
+        )
 
     def to_langgraph(self):
         try:
@@ -104,19 +106,24 @@ class LogScraperWorkflow:
             raise
 
         graph = StateGraph(AgentState)
+        graph.add_node("check_pr_outcomes", self.check_pr_outcomes)
         graph.add_node("fetch_datadog_logs", self._fetch_node)
         graph.add_node("deduplicate_errors", self._deduplicate_node)
+        graph.add_node("reset_for_next_error", self._reset_for_next_error)
         graph.add_node("route_error", self.route_error)
         graph.add_node("prepare_repo_workspace", self.prepare_repo_workspace)
         graph.add_node("analyze_dotnet_code", self.analyze_dotnet_code)
         graph.add_node("plan_fix", self.plan_fix)
         graph.add_node("apply_or_dry_run_fix", self.apply_or_dry_run_fix)
+        graph.add_node("validate_fix", self.validate_fix)
         graph.add_node("review_fix", self.review_fix)
         graph.add_node("update_history", self.update_history)
 
-        graph.add_edge(START, "fetch_datadog_logs")
+        graph.add_edge(START, "check_pr_outcomes")
+        graph.add_edge("check_pr_outcomes", "fetch_datadog_logs")
         graph.add_edge("fetch_datadog_logs", "deduplicate_errors")
-        graph.add_edge("deduplicate_errors", "route_error")
+        graph.add_edge("deduplicate_errors", "reset_for_next_error")
+        graph.add_edge("reset_for_next_error", "route_error")
         graph.add_conditional_edges(
             "route_error",
             self._route_after_routing,
@@ -127,11 +134,24 @@ class LogScraperWorkflow:
         )
         graph.add_edge("prepare_repo_workspace", "analyze_dotnet_code")
         graph.add_edge("analyze_dotnet_code", "plan_fix")
-        graph.add_edge("plan_fix", "apply_or_dry_run_fix")
-        graph.add_edge("apply_or_dry_run_fix", "review_fix")
+        graph.add_conditional_edges(
+            "plan_fix",
+            self._route_after_confidence,
+            {
+                "confident": "apply_or_dry_run_fix",
+                "low_confidence": "update_history",
+            },
+        )
+        graph.add_edge("apply_or_dry_run_fix", "validate_fix")
+        graph.add_edge("validate_fix", "review_fix")
         graph.add_edge("review_fix", "update_history")
-        graph.add_edge("update_history", END)
-        return graph.compile()
+        graph.add_edge("update_history", "reset_for_next_error")
+
+        try:
+            from langgraph.checkpoint.memory import MemorySaver
+            return graph.compile(checkpointer=MemorySaver())
+        except ImportError:
+            return graph.compile()
 
     def get_route_graph(self):
         graph = self.to_langgraph()
@@ -162,18 +182,40 @@ class LogScraperWorkflow:
         self.draw_mermaid_png(path)
         return path
 
+    def _log(self, msg: str, **extra: Any) -> None:
+        self._logger.info(msg, extra={"run_id": self._run_id, **extra})
+
+    def check_pr_outcomes(self, state: AgentState) -> AgentState:
+        """Reconcile open PRs — mark merged as resolved, closed as re-openable."""
+        self._log("check_pr_outcomes started")
+        from logscraper.connectors.github_connector import GitHubConnector
+        github = GitHubConnector(self.settings)
+        in_review = self.history.list_by_status(ErrorStatus.IN_REVIEW)
+        for record in in_review:
+            if not record.pr_url:
+                continue
+            pr_state = github.get_pr_state(record.pr_url)
+            if pr_state == "merged":
+                self.history.update_status(record.fingerprint, ErrorStatus.RESOLVED)
+                self._log("pr_outcome", fingerprint=record.fingerprint, pr_state="merged", new_status="resolved")
+            elif pr_state == "closed":
+                self.history.update_status(record.fingerprint, ErrorStatus.OPEN)
+                self._log("pr_outcome", fingerprint=record.fingerprint, pr_state="closed", new_status="open")
+        self._log("check_pr_outcomes completed", checked=len(in_review))
+        return state
+
     def _fetch_node(self, state: AgentState) -> AgentState:
-        print("[workflow] fetch_datadog_logs started")
+        self._log("fetch_datadog_logs started")
         if state.get("log_events"):
-            print(f"[workflow] fetch_datadog_logs skipped; existing_events={len(state['log_events'])}")
+            self._log("fetch_datadog_logs skipped", existing_events=len(state["log_events"]))
             return state
         log_events = self.fetch_datadog_logs()
-        print(f"[workflow] fetch_datadog_logs completed; events={len(log_events)}")
-        self._print_fetched_events(log_events)
+        self._log("fetch_datadog_logs completed", events=len(log_events))
+        self._log_fetched_events(log_events)
         return {**state, "log_events": log_events}
 
     def _deduplicate_node(self, state: AgentState) -> AgentState:
-        print(f"[workflow] deduplicate_errors started; events={len(state.get('log_events', []))}")
+        self._log("deduplicate_errors started", events=len(state.get("log_events", [])))
         seen: set[str] = set()
         unique: list[LogEvent] = []
         for event in state.get("log_events", []):
@@ -181,27 +223,47 @@ class LogScraperWorkflow:
                 continue
             seen.add(event.fingerprint)
             unique.append(event)
-        print(f"[workflow] deduplicate_errors completed; unique_events={len(unique)}")
+        self._log("deduplicate_errors completed", unique_events=len(unique))
         return {**state, "log_events": unique}
+
+    def _reset_for_next_error(self, state: AgentState) -> AgentState:
+        """Clear routing-relevant fields so the next iteration can pick a new error."""
+        return {
+            **state,
+            "current_event": None,
+            "resolution_task": None,
+        }
 
     def _route_after_routing(self, state: AgentState) -> str:
         return "actionable" if state.get("resolution_task") else "done"
 
+    def _route_after_confidence(self, state: AgentState) -> str:
+        plan = state.get("code_fix_plan")
+        threshold = self.settings.confidence_threshold
+        if plan and plan.confidence >= threshold:
+            self._log("confidence gate passed", confidence=plan.confidence, threshold=threshold)
+            return "confident"
+        self._log("confidence gate failed; skipping fix", confidence=plan.confidence if plan else 0.0,
+                  threshold=threshold)
+        return "low_confidence"
+
     def fetch_datadog_logs(self) -> list[LogEvent]:
         return self.log_scraper.fetch_events()
 
-    def _print_fetched_events(self, events: list[LogEvent]) -> None:
+    def _log_fetched_events(self, events: list[LogEvent]) -> None:
         for index, event in enumerate(events, start=1):
-            print(
-                "[workflow] fetched_event "
-                f"#{index} timestamp={event.timestamp.isoformat()} "
-                f"status={event.log_level} inferred={event.inferred_severity} "
-                f"service={event.service} document_id={event.document_id} "
-                f"fingerprint={event.fingerprint} "
-                f"message={self._truncate(event.exception_message or event.error_message, limit=300)} "
-                f"frames={len(event.frames)}"
+            self._log(
+                "fetched_event",
+                index=index,
+                timestamp=event.timestamp.isoformat(),
+                status=event.log_level,
+                inferred=event.inferred_severity,
+                service=event.service,
+                document_id=event.document_id,
+                fingerprint=event.fingerprint,
+                event_message=self._truncate(event.exception_message or event.error_message, limit=300),
+                frames=len(event.frames),
             )
-            print(f"[workflow] fetched_event_full #{index} {self._json_text(event.raw_payload)}")
 
     def _truncate(self, value: str, *, limit: int) -> str:
         if len(value) <= limit:
@@ -212,68 +274,69 @@ class LogScraperWorkflow:
         return json.dumps(value, default=str, sort_keys=True)
 
     def route_error(self, state: AgentState) -> AgentState:
-        print(f"[workflow] route_error started; events={len(state.get('log_events', []))}")
+        self._log("route_error started", events=len(state.get("log_events", [])))
         for event in state.get("log_events", []):
             route, task = self.master.route_event(event)
             state["route"] = route
-            print(f"[workflow] route_error checked; route={route} fingerprint={event.fingerprint}")
+            self._log("route_error checked", route=route, fingerprint=event.fingerprint)
             if task:
                 state["current_event"] = event
                 state["resolution_task"] = task
                 self.history.update_status(task.fingerprint, ErrorStatus.IN_ANALYSIS)
-                print(f"[workflow] route_error completed; selected_fingerprint={task.fingerprint}")
+                self._log("route_error completed", selected_fingerprint=task.fingerprint)
                 return state
-        print("[workflow] route_error completed; no actionable task")
+        self._log("route_error completed; no actionable task")
         return state
 
     def prepare_repo_workspace(self, state: AgentState) -> AgentState:
-        print("[workflow] prepare_repo_workspace started")
+        self._log("prepare_repo_workspace started")
         task = state.get("resolution_task")
         if task is None:
-            print("[workflow] prepare_repo_workspace skipped; no resolution task")
+            self._log("prepare_repo_workspace skipped; no resolution task")
             return state
 
         if self.settings.github_token and self.settings.github_repository:
             repo_path = self.repo_workspace.prepare(task.fingerprint)
             state["repo_path"] = str(repo_path)
-            print(f"[workflow] prepare_repo_workspace completed; repo_path={repo_path}")
+            self._log("prepare_repo_workspace completed", repo_path=str(repo_path))
             return state
 
         local_repo = self.settings.dotnet_repo
         if local_repo:
             state["repo_path"] = str(local_repo)
-            print(f"[workflow] prepare_repo_workspace completed; local_repo_path={local_repo}")
+            self._log("prepare_repo_workspace completed", local_repo_path=str(local_repo))
             return state
 
-        print("[workflow] prepare_repo_workspace completed; no GitHub or local repo configured")
+        self._log("prepare_repo_workspace completed; no repo configured")
         return state
 
     def analyze_dotnet_code(self, state: AgentState) -> AgentState:
-        print("[workflow] analyze_dotnet_code started")
+        self._log("analyze_dotnet_code started")
         task = state.get("resolution_task")
         if task is None:
-            print("[workflow] analyze_dotnet_code skipped; no resolution task")
+            self._log("analyze_dotnet_code skipped; no resolution task")
             return state
         state["code_fix_plan"] = self.analyzer.analyze(task, repo_path=state.get("repo_path"))
-        print(f"[workflow] analyze_dotnet_code completed; fingerprint={task.fingerprint}")
+        self._log("analyze_dotnet_code completed", fingerprint=task.fingerprint,
+                  confidence=state["code_fix_plan"].confidence)
         return state
 
     def plan_fix(self, state: AgentState) -> AgentState:
-        print("[workflow] plan_fix started")
+        self._log("plan_fix started")
         task = state.get("resolution_task")
         if task is not None:
             self.history.update_status(task.fingerprint, ErrorStatus.FIX_PLANNED)
-            print(f"[workflow] plan_fix completed; fingerprint={task.fingerprint}")
+            self._log("plan_fix completed", fingerprint=task.fingerprint)
         else:
-            print("[workflow] plan_fix skipped; no resolution task")
+            self._log("plan_fix skipped; no resolution task")
         return state
 
     def apply_or_dry_run_fix(self, state: AgentState) -> AgentState:
-        print("[workflow] apply_or_dry_run_fix started")
+        self._log("apply_or_dry_run_fix started")
         task = state.get("resolution_task")
         plan = state.get("code_fix_plan")
         if task is None or plan is None:
-            print("[workflow] apply_or_dry_run_fix skipped; missing task or plan")
+            self._log("apply_or_dry_run_fix skipped; missing task or plan")
             return state
         state["pull_request_result"] = self.resolver.apply_or_dry_run_fix(
             task,
@@ -281,36 +344,95 @@ class LogScraperWorkflow:
             repo_path=state.get("repo_path"),
         )
         result = state["pull_request_result"]
-        print(
-            "[workflow] apply_or_dry_run_fix completed; "
-            f"dry_run={result.dry_run} branch={result.branch_name} pr_url={result.pr_url}"
-        )
+        self._log("apply_or_dry_run_fix completed",
+                  dry_run=result.dry_run, branch=result.branch_name, pr_url=result.pr_url)
+        return state
+
+    def validate_fix(self, state: AgentState) -> AgentState:
+        self._log("validate_fix started")
+        repo_path = state.get("repo_path")
+        plan = state.get("code_fix_plan")
+        if not repo_path or not plan or not plan.suggested_tests:
+            self._log("validate_fix skipped; no repo or test commands")
+            state["validation_passed"] = None
+            return state
+
+        from logscraper.dotnet.test_runner import DotNetTestRunner
+        runner = DotNetTestRunner(repo_path)
+        all_passed = True
+        failure_output: list[str] = []
+        for command in plan.suggested_tests:
+            result = runner.run(command)
+            self._log("validate_fix ran", command=command, passed=result.passed, return_code=result.return_code)
+            if not result.passed:
+                all_passed = False
+                failure_output.append(f"Command: {command}\n{result.stderr or result.stdout}")
+
+        if all_passed:
+            state["validation_passed"] = True
+            self._log("validate_fix completed", passed=True)
+            return state
+
+        # Retry once: re-analyze with test failure output as enriched context
+        task = state.get("resolution_task")
+        if task and failure_output:
+            self._log("validate_fix retrying with enriched context")
+            enriched = task.log_event.model_copy(
+                update={"detailed_exception": task.log_event.detailed_exception
+                        + "\n\n--- Test Failure Output ---\n" + "\n".join(failure_output)}
+            )
+            enriched_task = task.model_copy(update={"log_event": enriched})
+            state["code_fix_plan"] = self.analyzer.analyze(enriched_task, repo_path=repo_path)
+            self._log("validate_fix re-analyzed", confidence=state["code_fix_plan"].confidence)
+
+        state["validation_passed"] = False
+        self._log("validate_fix completed", passed=False)
         return state
 
     def review_fix(self, state: AgentState) -> AgentState:
-        print("[workflow] review_fix started")
+        self._log("review_fix started")
         plan = state.get("code_fix_plan")
         result = state.get("pull_request_result")
         if plan is None or result is None:
-            print("[workflow] review_fix skipped; missing plan or pull request result")
+            self._log("review_fix skipped; missing plan or pull request result")
             return state
         state["review_result"] = self.reviewer.review(plan, result)
-        print("[workflow] review_fix completed")
+        review = state["review_result"]
+        self._log("review_fix completed", approved=review.approved, findings=len(review.findings))
         return state
 
     def update_history(self, state: AgentState) -> AgentState:
-        print("[workflow] update_history started")
+        self._log("update_history started")
         task = state.get("resolution_task")
         result = state.get("pull_request_result")
+        plan = state.get("code_fix_plan")
+        review = state.get("review_result")
         if task is None or result is None:
-            print("[workflow] update_history skipped; missing task or pull request result")
+            self._log("update_history skipped; missing task or pull request result")
             return state
         if result.pr_url:
             self.history.attach_pr(task.fingerprint, result.pr_url, status=ErrorStatus.IN_REVIEW)
-            print(f"[workflow] update_history completed; pr_url={result.pr_url}")
+            self._log("update_history completed", pr_url=result.pr_url)
         else:
             self.history.update_status(task.fingerprint, ErrorStatus.FIX_PLANNED)
-            print(f"[workflow] update_history completed; status={ErrorStatus.FIX_PLANNED.value}")
+            self._log("update_history completed", status=ErrorStatus.FIX_PLANNED.value)
+
+        # Accumulate processed error summary
+        event = state.get("current_event")
+        entry = ProcessedError(
+            fingerprint=task.fingerprint,
+            exception_type=event.exception_type if event else None,
+            route=state.get("route") or "",
+            confidence=plan.confidence if plan else 0.0,
+            pr_url=result.pr_url,
+            review_approved=review.approved if review else False,
+            review_findings=review.findings if review else [],
+            validation_passed=state.get("validation_passed"),
+            outcome="pr_created" if result.pr_url else ("dry_run" if result.dry_run else "skipped"),
+        )
+        processed = list(state.get("processed_errors") or [])
+        processed.append(entry)
+        state["processed_errors"] = processed
         return state
 
 
@@ -326,13 +448,15 @@ def build_workflow(
 ) -> LogScraperWorkflow:
     resolved_settings = settings or AppSettings()
     resolved_history = history or HistoryDB(resolved_settings.db_path)
+    from logscraper.llm.client import LLMClient
+    llm_client = LLMClient(resolved_settings)
     return LogScraperWorkflow(
         settings=resolved_settings,
         log_scraper=log_scraper or LogScraperAgent(resolved_settings),
         master=MasterAgent(resolved_history),
         analyzer=analyzer or DotNetAnalyzerAgent(resolved_settings),
         resolver=resolver or ResolverAgent(resolved_settings),
-        reviewer=reviewer or PRReviewerAgent(),
+        reviewer=reviewer or PRReviewerAgent(llm_client=llm_client),
         repo_workspace=repo_workspace or GitHubRepoWorkspace(resolved_settings),
         history=resolved_history,
     )

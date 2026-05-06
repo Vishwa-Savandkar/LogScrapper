@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, TypeAlias
 
 from logscraper.config import AppSettings
+from logscraper.tls import windows_cert_store_context
 
 
 logger = logging.getLogger(__name__)
@@ -507,33 +508,8 @@ class DatadogConnector:
         if not self.settings.datadog_mcp_verify_ssl:
             return False
         if self.settings.datadog_mcp_use_windows_cert_store and sys.platform == "win32":
-            return self._windows_cert_store_context()
+            return windows_cert_store_context()
         return True
-
-    def _windows_cert_store_context(self) -> ssl.SSLContext:
-        context = ssl.create_default_context()
-        if not hasattr(ssl, "enum_certificates"):
-            return context
-
-        pem_certificates: list[str] = []
-        for store_name in ("ROOT", "CA"):
-            try:
-                certificates = ssl.enum_certificates(store_name)
-            except OSError:
-                continue
-            for certificate, encoding, trust in certificates:
-                if encoding != "x509_asn":
-                    continue
-                if trust is not True and "1.3.6.1.5.5.7.3.1" not in trust:
-                    continue
-                try:
-                    pem_certificates.append(ssl.DER_cert_to_PEM_cert(certificate))
-                except ValueError:
-                    continue
-
-        if pem_certificates:
-            context.load_verify_locations(cadata="\n".join(pem_certificates))
-        return context
 
     def _can_fallback_to_api(self, exc: RuntimeError) -> bool:
         message = str(exc).lower()

@@ -125,6 +125,14 @@ class HistoryDB:
             rows = connection.execute("SELECT * FROM errors ORDER BY last_seen DESC").fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    def list_by_status(self, status: ErrorStatus) -> list[ErrorRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM errors WHERE status = ? ORDER BY last_seen DESC",
+                (_status_value(status),),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     def _row_to_record(self, row: sqlite3.Row) -> ErrorRecord:
         return ErrorRecord(
             fingerprint=row["fingerprint"],
