@@ -165,6 +165,63 @@ class AppSettings:
         self.llm_provider = str(_get_setting(overrides, env, "llm_provider", "LLM_PROVIDER", default="openai"))
         self.llm_model = str(_get_setting(overrides, env, "llm_model", "LLM_MODEL"))
 
+        self.langsmith_tracing = str(
+            _get_setting(
+                overrides,
+                env,
+                "langsmith_tracing",
+                "LANGSMITH_TRACING",
+                "LANGSMITH_TRACING_V2",
+                "LANGCHAIN_TRACING_V2",
+                default="",
+            )
+        )
+        self.langsmith_endpoint = str(
+            _get_setting(
+                overrides,
+                env,
+                "langsmith_endpoint",
+                "LANGSMITH_ENDPOINT",
+                "LANGCHAIN_ENDPOINT",
+                default="",
+            )
+        )
+        self.langsmith_api_key = str(
+            _get_setting(overrides, env, "langsmith_api_key", "LANGSMITH_API_KEY", "LANGCHAIN_API_KEY")
+        )
+        self.langsmith_project = str(
+            _get_setting(overrides, env, "langsmith_project", "LANGSMITH_PROJECT", "LANGCHAIN_PROJECT")
+        )
+        self.langsmith_ca_bundle = str(
+            _get_setting(
+                overrides,
+                env,
+                "langsmith_ca_bundle",
+                "LANGSMITH_CA_BUNDLE",
+                "REQUESTS_CA_BUNDLE",
+                "SSL_CERT_FILE",
+                default="",
+            )
+        )
+        self.langsmith_use_windows_cert_store = _parse_bool(
+            _get_setting(
+                overrides,
+                env,
+                "langsmith_use_windows_cert_store",
+                "LANGSMITH_USE_WINDOWS_CERT_STORE",
+                default="true",
+            )
+        )
+        self.langsmith_windows_ca_bundle_path = str(
+            _get_setting(
+                overrides,
+                env,
+                "langsmith_windows_ca_bundle_path",
+                "LANGSMITH_WINDOWS_CA_BUNDLE_PATH",
+                default="./data/langsmith-windows-ca-bundle.pem",
+            )
+        )
+
         self.db_path = str(_get_setting(overrides, env, "db_path", "DB_PATH", default="./data/logscraper.db"))
         self.dry_run = _parse_bool(_get_setting(overrides, env, "dry_run", "DRY_RUN", default="true"))
         self.dotnet_repo_path = str(_get_setting(overrides, env, "dotnet_repo_path", "DOTNET_REPO_PATH"))

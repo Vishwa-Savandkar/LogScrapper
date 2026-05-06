@@ -5,12 +5,16 @@ import logging
 from .config import AppSettings
 from .graph.workflow import build_workflow
 from .logging import configure_logging
+from .tls import configure_langsmith_environment
 
 
 def main() -> int:
     settings = AppSettings()
     configure_logging()
     logger = logging.getLogger("logscraper")
+    langsmith_ca_bundle = configure_langsmith_environment(settings)
+    if langsmith_ca_bundle is not None:
+        logger.info("LangSmith TLS trust configured.", extra={"ca_bundle": str(langsmith_ca_bundle)})
 
     workflow = build_workflow(settings=settings)
     if settings.workflow_graph_path:

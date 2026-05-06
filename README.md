@@ -84,6 +84,17 @@ LLM_MODEL=gpt-4o-mini
 
 If OpenAI is not configured or the request fails, the analyzer falls back to the existing stack-frame based fix plan.
 
+LangSmith tracing is optional:
+
+```powershell
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=your-langsmith-key
+LANGSMITH_PROJECT=LogScraper
+```
+
+On Windows, when LangSmith tracing is enabled, LogScraper exports the Windows trusted certificate store to `LANGSMITH_WINDOWS_CA_BUNDLE_PATH` and points `requests` at that PEM bundle. This keeps certificate verification enabled while allowing corporate TLS proxy roots. If your company provides a separate PEM bundle, set `LANGSMITH_CA_BUNDLE` to that file instead.
+
 ## Run
 
 ```powershell
