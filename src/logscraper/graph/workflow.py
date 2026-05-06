@@ -109,21 +109,17 @@ class LogScraperWorkflow:
         graph.add_node("check_pr_outcomes", self.check_pr_outcomes)
         graph.add_node("fetch_datadog_logs", self._fetch_node)
         graph.add_node("deduplicate_errors", self._deduplicate_node)
-        graph.add_node("reset_for_next_error", self._reset_for_next_error)
         graph.add_node("route_error", self.route_error)
         graph.add_node("prepare_repo_workspace", self.prepare_repo_workspace)
         graph.add_node("analyze_dotnet_code", self.analyze_dotnet_code)
-        graph.add_node("plan_fix", self.plan_fix)
         graph.add_node("apply_or_dry_run_fix", self.apply_or_dry_run_fix)
-        graph.add_node("validate_fix", self.validate_fix)
         graph.add_node("review_fix", self.review_fix)
         graph.add_node("update_history", self.update_history)
 
         graph.add_edge(START, "check_pr_outcomes")
         graph.add_edge("check_pr_outcomes", "fetch_datadog_logs")
         graph.add_edge("fetch_datadog_logs", "deduplicate_errors")
-        graph.add_edge("deduplicate_errors", "reset_for_next_error")
-        graph.add_edge("reset_for_next_error", "route_error")
+        graph.add_edge("deduplicate_errors", "route_error")
         graph.add_conditional_edges(
             "route_error",
             self._route_after_routing,
@@ -133,19 +129,17 @@ class LogScraperWorkflow:
             },
         )
         graph.add_edge("prepare_repo_workspace", "analyze_dotnet_code")
-        graph.add_edge("analyze_dotnet_code", "plan_fix")
         graph.add_conditional_edges(
-            "plan_fix",
+            "analyze_dotnet_code",
             self._route_after_confidence,
             {
                 "confident": "apply_or_dry_run_fix",
                 "low_confidence": "update_history",
             },
         )
-        graph.add_edge("apply_or_dry_run_fix", "validate_fix")
-        graph.add_edge("validate_fix", "review_fix")
+        graph.add_edge("apply_or_dry_run_fix", "review_fix")
         graph.add_edge("review_fix", "update_history")
-        graph.add_edge("update_history", "reset_for_next_error")
+        graph.add_edge("update_history", "route_error")
 
         try:
             from langgraph.checkpoint.memory import MemorySaver
@@ -226,14 +220,6 @@ class LogScraperWorkflow:
         self._log("deduplicate_errors completed", unique_events=len(unique))
         return {**state, "log_events": unique}
 
-    def _reset_for_next_error(self, state: AgentState) -> AgentState:
-        """Clear routing-relevant fields so the next iteration can pick a new error."""
-        return {
-            **state,
-            "current_event": None,
-            "resolution_task": None,
-        }
-
     def _route_after_routing(self, state: AgentState) -> str:
         return "actionable" if state.get("resolution_task") else "done"
 
@@ -275,6 +261,8 @@ class LogScraperWorkflow:
 
     def route_error(self, state: AgentState) -> AgentState:
         self._log("route_error started", events=len(state.get("log_events", [])))
+        state["current_event"] = None
+        state["resolution_task"] = None
         for event in state.get("log_events", []):
             route, task = self.master.route_event(event)
             state["route"] = route
@@ -317,18 +305,9 @@ class LogScraperWorkflow:
             self._log("analyze_dotnet_code skipped; no resolution task")
             return state
         state["code_fix_plan"] = self.analyzer.analyze(task, repo_path=state.get("repo_path"))
+        self.history.update_status(task.fingerprint, ErrorStatus.FIX_PLANNED)
         self._log("analyze_dotnet_code completed", fingerprint=task.fingerprint,
                   confidence=state["code_fix_plan"].confidence)
-        return state
-
-    def plan_fix(self, state: AgentState) -> AgentState:
-        self._log("plan_fix started")
-        task = state.get("resolution_task")
-        if task is not None:
-            self.history.update_status(task.fingerprint, ErrorStatus.FIX_PLANNED)
-            self._log("plan_fix completed", fingerprint=task.fingerprint)
-        else:
-            self._log("plan_fix skipped; no resolution task")
         return state
 
     def apply_or_dry_run_fix(self, state: AgentState) -> AgentState:
@@ -344,49 +323,10 @@ class LogScraperWorkflow:
             repo_path=state.get("repo_path"),
         )
         result = state["pull_request_result"]
+        state["validation_passed"] = result.validation_passed
         self._log("apply_or_dry_run_fix completed",
-                  dry_run=result.dry_run, branch=result.branch_name, pr_url=result.pr_url)
-        return state
-
-    def validate_fix(self, state: AgentState) -> AgentState:
-        self._log("validate_fix started")
-        repo_path = state.get("repo_path")
-        plan = state.get("code_fix_plan")
-        if not repo_path or not plan or not plan.suggested_tests:
-            self._log("validate_fix skipped; no repo or test commands")
-            state["validation_passed"] = None
-            return state
-
-        from logscraper.dotnet.test_runner import DotNetTestRunner
-        runner = DotNetTestRunner(repo_path)
-        all_passed = True
-        failure_output: list[str] = []
-        for command in plan.suggested_tests:
-            result = runner.run(command)
-            self._log("validate_fix ran", command=command, passed=result.passed, return_code=result.return_code)
-            if not result.passed:
-                all_passed = False
-                failure_output.append(f"Command: {command}\n{result.stderr or result.stdout}")
-
-        if all_passed:
-            state["validation_passed"] = True
-            self._log("validate_fix completed", passed=True)
-            return state
-
-        # Retry once: re-analyze with test failure output as enriched context
-        task = state.get("resolution_task")
-        if task and failure_output:
-            self._log("validate_fix retrying with enriched context")
-            enriched = task.log_event.model_copy(
-                update={"detailed_exception": task.log_event.detailed_exception
-                        + "\n\n--- Test Failure Output ---\n" + "\n".join(failure_output)}
-            )
-            enriched_task = task.model_copy(update={"log_event": enriched})
-            state["code_fix_plan"] = self.analyzer.analyze(enriched_task, repo_path=repo_path)
-            self._log("validate_fix re-analyzed", confidence=state["code_fix_plan"].confidence)
-
-        state["validation_passed"] = False
-        self._log("validate_fix completed", passed=False)
+                  dry_run=result.dry_run, branch=result.branch_name,
+                  pr_url=result.pr_url, validation_passed=result.validation_passed)
         return state
 
     def review_fix(self, state: AgentState) -> AgentState:

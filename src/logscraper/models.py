@@ -102,6 +102,7 @@ class PullRequestResult(BaseModel):
     pr_url: str | None = None
     files_changed: list[str] = Field(default_factory=list)
     tests_run: list[str] = Field(default_factory=list)
+    validation_passed: bool | None = None
 
 
 class ReviewResult(BaseModel):

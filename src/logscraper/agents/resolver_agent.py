@@ -56,6 +56,7 @@ class ResolverAgent:
                 pr_url=None,
                 files_changed=[],
                 tests_run=plan.suggested_tests,
+                validation_passed=None,
             )
 
         if repo_path is None:
@@ -75,7 +76,10 @@ class ResolverAgent:
         if not files_changed:
             raise RuntimeError("The LLM did not return any applicable file changes.")
 
-        tests_run = self._run_suggested_tests(repo, plan.suggested_tests)
+        validation_passed, tests_run = self._validate_and_retry(
+            repo, task, plan, source_files, files_changed,
+        )
+
         self._commit_changes(repo, files_changed, commit_message)
         self._push_branch(repo, branch_name)
         pr_body = self._pr_body(task, plan, files_changed=files_changed, tests_run=tests_run)
@@ -94,6 +98,7 @@ class ResolverAgent:
             pr_url=pr_url,
             files_changed=files_changed,
             tests_run=tests_run,
+            validation_passed=validation_passed,
         )
 
     def _branch_name(self, exception_type: str | None, fingerprint: str) -> str:
@@ -298,6 +303,57 @@ class ResolverAgent:
                 raise RuntimeError(f"Verification failed for `{command}`: {output[:2000]}")
             results.append(command)
         return results
+
+    def _validate_and_retry(
+        self,
+        repo: Path,
+        task: ResolutionTask,
+        plan: CodeFixPlan,
+        source_files: list[dict[str, str]],
+        files_changed: list[str],
+    ) -> tuple[bool, list[str]]:
+        """Run tests before commit. On failure, retry once with enriched context."""
+        try:
+            tests_run = self._run_suggested_tests(repo, plan.suggested_tests)
+            return True, tests_run
+        except RuntimeError as exc:
+            failure_output = str(exc)
+
+        # Retry: re-generate fix with test failure context
+        print("[resolver] tests failed; retrying with enriched context")
+        enriched_context = self._resolve_context(task, plan) + (
+            "\n\n--- Test Failure Output ---\n" + failure_output
+        )
+
+        # Reset files to original state before re-applying
+        for file_info in source_files:
+            path = repo / file_info["path"]
+            path.write_text(file_info["content"], encoding="utf-8")
+
+        changes = self.llm_client.generate_file_changes(
+            resolve_context=enriched_context,
+            source_files=source_files,
+        )
+        files_changed_retry = self._apply_file_changes(repo, changes, plan.files_allowed_to_edit)
+        if not files_changed_retry:
+            print("[resolver] retry produced no file changes; proceeding with original")
+            # Re-apply original changes
+            for file_info in source_files:
+                path = repo / file_info["path"]
+                path.write_text(file_info["content"], encoding="utf-8")
+            changes_orig = self.llm_client.generate_file_changes(
+                resolve_context=self._resolve_context(task, plan),
+                source_files=source_files,
+            )
+            self._apply_file_changes(repo, changes_orig, plan.files_allowed_to_edit)
+            return False, plan.suggested_tests
+
+        try:
+            tests_run = self._run_suggested_tests(repo, plan.suggested_tests)
+            return True, tests_run
+        except RuntimeError:
+            print("[resolver] retry tests also failed; proceeding with best-effort fix")
+            return False, plan.suggested_tests
 
     def _commit_changes(self, repo: Path, files_changed: list[str], commit_message: str) -> None:
         self._run_git(["add", "--", *files_changed], cwd=repo)

@@ -8,31 +8,25 @@ graph TD;
 	check_pr_outcomes(check_pr_outcomes)
 	fetch_datadog_logs(fetch_datadog_logs)
 	deduplicate_errors(deduplicate_errors)
-	reset_for_next_error(reset_for_next_error)
 	route_error(route_error)
 	prepare_repo_workspace(prepare_repo_workspace)
 	analyze_dotnet_code(analyze_dotnet_code)
-	plan_fix(plan_fix)
 	apply_or_dry_run_fix(apply_or_dry_run_fix)
-	validate_fix(validate_fix)
 	review_fix(review_fix)
 	update_history(update_history)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> check_pr_outcomes;
-	analyze_dotnet_code --> plan_fix;
-	apply_or_dry_run_fix --> validate_fix;
+	analyze_dotnet_code -. &nbsp;confident&nbsp; .-> apply_or_dry_run_fix;
+	analyze_dotnet_code -. &nbsp;low_confidence&nbsp; .-> update_history;
+	apply_or_dry_run_fix --> review_fix;
 	check_pr_outcomes --> fetch_datadog_logs;
-	deduplicate_errors --> reset_for_next_error;
+	deduplicate_errors --> route_error;
 	fetch_datadog_logs --> deduplicate_errors;
-	plan_fix -. &nbsp;confident&nbsp; .-> apply_or_dry_run_fix;
-	plan_fix -. &nbsp;low_confidence&nbsp; .-> update_history;
 	prepare_repo_workspace --> analyze_dotnet_code;
-	reset_for_next_error --> route_error;
 	review_fix --> update_history;
 	route_error -. &nbsp;done&nbsp; .-> __end__;
 	route_error -. &nbsp;actionable&nbsp; .-> prepare_repo_workspace;
-	update_history --> reset_for_next_error;
-	validate_fix --> review_fix;
+	update_history --> route_error;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc
