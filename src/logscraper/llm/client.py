@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from langsmith import traceable
+
 from logscraper.config import AppSettings
 
 
@@ -30,6 +32,7 @@ class LLMClient:
             return bool(self.settings.aws_region)
         return bool(self.settings.openai_api_key)
 
+    @traceable(run_type="llm", name="suggest_fix")
     def suggest_fix(self, *, error_context: str, source_context: str) -> str | None:
         if not self.is_configured():
             print("[llm] skipped; LLM credentials are not configured")
@@ -104,6 +107,7 @@ class LLMClient:
         print("[llm] OpenAI returned an empty message")
         return None
 
+    @traceable(run_type="llm", name="generate_file_changes")
     def generate_file_changes(
         self,
         *,
