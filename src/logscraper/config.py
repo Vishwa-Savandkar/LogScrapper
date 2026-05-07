@@ -165,6 +165,28 @@ class AppSettings:
         self.llm_provider = str(_get_setting(overrides, env, "llm_provider", "LLM_PROVIDER", default="openai"))
         self.llm_model = str(_get_setting(overrides, env, "llm_model", "LLM_MODEL"))
 
+        self.aws_region = str(
+            _get_setting(overrides, env, "aws_region", "AWS_REGION", "AWS_DEFAULT_REGION", default="eu-west-1")
+        )
+        self.aws_bedrock_model_id = str(
+            _get_setting(
+                overrides,
+                env,
+                "aws_bedrock_model_id",
+                "AWS_BEDROCK_MODEL_ID",
+                default="anthropic.claude-3-5-sonnet-20241022-v2:0",
+            )
+        )
+        self.aws_access_key_id = str(
+            _get_setting(overrides, env, "aws_access_key_id", "AWS_ACCESS_KEY_ID")
+        )
+        self.aws_secret_access_key = str(
+            _get_setting(overrides, env, "aws_secret_access_key", "AWS_SECRET_ACCESS_KEY")
+        )
+        self.aws_session_token = str(
+            _get_setting(overrides, env, "aws_session_token", "AWS_SESSION_TOKEN")
+        )
+
         self.langsmith_tracing = str(
             _get_setting(
                 overrides,

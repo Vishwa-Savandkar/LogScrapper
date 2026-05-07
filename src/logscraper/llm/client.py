@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from langsmith import traceable
+
 from logscraper.config import AppSettings
 
 
@@ -26,12 +28,40 @@ class LLMClient:
     def is_configured(self) -> bool:
         if self.settings.llm_provider == "azure":
             return bool(self.settings.azure_openai_endpoint and self.settings.azure_openai_api_key)
+        if self.settings.llm_provider == "bedrock":
+            return bool(self.settings.aws_region)
         return bool(self.settings.openai_api_key)
 
+    @traceable(run_type="llm", name="suggest_fix")
     def suggest_fix(self, *, error_context: str, source_context: str) -> str | None:
         if not self.is_configured():
-            print("[llm] skipped; OpenAI credentials are not configured")
+            print("[llm] skipped; LLM credentials are not configured")
             return None
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior .NET engineer helping an automated repair agent. "
+                    "Use only the provided error and source context. "
+                    "Return a concise root-cause note and a practical suggested fix."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "\n\n".join(
+                    [
+                        "Error context:",
+                        error_context,
+                        "Candidate source context:",
+                        source_context or "No source files were mapped.",
+                    ]
+                ),
+            },
+        ]
+
+        if self.settings.llm_provider == "bedrock":
+            return self._request_bedrock(messages, temperature=0.2)
         if self.settings.llm_provider != "openai":
             print(f"[llm] skipped; provider={self.settings.llm_provider} is not implemented yet")
             return None
@@ -46,27 +76,7 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": model,
             "temperature": 0.2,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a senior .NET engineer helping an automated repair agent. "
-                        "Use only the provided error and source context. "
-                        "Return a concise root-cause note and a practical suggested fix."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": "\n\n".join(
-                        [
-                            "Error context:",
-                            error_context,
-                            "Candidate source context:",
-                            source_context or "No source files were mapped.",
-                        ]
-                    ),
-                },
-            ],
+            "messages": messages,
         }
         headers = {
             "Authorization": f"Bearer {self.settings.openai_api_key}",
@@ -97,6 +107,7 @@ class LLMClient:
         print("[llm] OpenAI returned an empty message")
         return None
 
+    @traceable(run_type="llm", name="generate_file_changes")
     def generate_file_changes(
         self,
         *,
@@ -104,21 +115,106 @@ class LLMClient:
         source_files: list[dict[str, str]],
     ) -> list[dict[str, Any]]:
         if not self.is_configured():
-            print("[llm] skipped; OpenAI credentials are not configured")
+            print("[llm] skipped; LLM credentials are not configured")
             return []
-        if self.settings.llm_provider != "openai":
+
+        file_change_system_prompt = (
+            "You are a senior .NET engineer applying a safe automated repair. "
+            "Use only the supplied error context, prior analysis, and source files. "
+            "Do not ask for more data. Return strict JSON only. Prefer small exact replacements: "
+            '{"changes":[{"path":"relative/path.cs","replacements":[{"old":"exact existing text",'
+            '"new":"replacement text"}]}]}. '
+            "Only use complete file content when a replacement cannot be expressed: "
+            '{"changes":[{"path":"relative/path.cs","content":"complete new file content"}]}. '
+            "Only include files that need to change, and keep the response compact."
+        )
+        user_content = "\n\n".join(
+            [
+                "Resolve context:",
+                resolve_context,
+                "Allowed source files:",
+                json.dumps(self._compact_source_files(source_files), ensure_ascii=False),
+            ]
+        )
+
+        if self.settings.llm_provider == "bedrock":
+            messages = [
+                {"role": "system", "content": file_change_system_prompt},
+                {"role": "user", "content": user_content},
+            ]
+            response_text = self._request_bedrock(messages, temperature=0.1, max_tokens=6000)
+        elif self.settings.llm_provider == "openai":
+            response_text = self._request_openai_file_changes(
+                resolve_context=resolve_context,
+                source_files=self._compact_source_files(source_files),
+            )
+        else:
             print(f"[llm] skipped; provider={self.settings.llm_provider} is not implemented yet")
             return []
 
-        response_text = self._request_openai_file_changes(
-            resolve_context=resolve_context,
-            source_files=self._compact_source_files(source_files),
-        )
         if not response_text:
             return []
         changes = self._parse_file_changes(response_text)
-        print(f"[llm] OpenAI file-change generation completed; changes={len(changes)}")
+        print(f"[llm] file-change generation completed; changes={len(changes)}")
         return changes
+
+    def _request_bedrock(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.2,
+        max_tokens: int = 4096,
+    ) -> str | None:
+        try:
+            import boto3
+        except ImportError:
+            print("[llm] skipped; boto3 is not installed")
+            return None
+
+        model_id = self.settings.aws_bedrock_model_id
+        region = self.settings.aws_region
+
+        # Separate system messages from conversation messages
+        system_prompt = [{"text": m["content"]} for m in messages if m["role"] == "system"]
+        bedrock_messages = [
+            {"role": m["role"], "content": [{"text": m["content"]}]}
+            for m in messages
+            if m["role"] != "system"
+        ]
+
+        print(f"[llm] requesting Bedrock analysis model={model_id} region={region}")
+        try:
+            client_kwargs: dict[str, Any] = {"region_name": region}
+            if self.settings.aws_access_key_id:
+                client_kwargs["aws_access_key_id"] = self.settings.aws_access_key_id
+            if self.settings.aws_secret_access_key:
+                client_kwargs["aws_secret_access_key"] = self.settings.aws_secret_access_key
+            if self.settings.aws_session_token:
+                client_kwargs["aws_session_token"] = self.settings.aws_session_token
+            client = boto3.client("bedrock-runtime", **client_kwargs)
+            response = client.converse(
+                modelId=model_id,
+                messages=bedrock_messages,
+                system=system_prompt,
+                inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
+            )
+        except Exception as exc:
+            print(f"[llm] Bedrock request failed: {exc}")
+            return None
+
+        try:
+            content_blocks = response["output"]["message"]["content"]
+            text = content_blocks[0]["text"] if content_blocks else ""
+        except (KeyError, IndexError):
+            print("[llm] Bedrock returned unexpected response structure")
+            return None
+
+        if text.strip():
+            print("[llm] Bedrock analysis completed")
+            return text.strip()
+
+        print("[llm] Bedrock returned an empty message")
+        return None
 
     def _request_openai_file_changes(
         self,
